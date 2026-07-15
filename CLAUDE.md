@@ -21,6 +21,7 @@ RunPod H200 单卡部署 LingBot-Video（30B-A3B MoE，arXiv 2607.07675）的脚
 
 - **不改上游/fork 的模型代码——用户拍板的决定**。依赖缺口一律在部署层（setup_env.sh）解决，不给 lingbot-video 打补丁。
 - DiT 的 packed 注意力路径（`--batch_cfg` 即 batch>1，或 context parallel）硬依赖 FA3 的 `flash_attn_interface`，上游 requirements 未带 → setup_env.sh 源码编译 flash-attention 的 `hopper/` 子目录安装；无 FA3 时运行加 `BATCH_CFG=0` 绕过（B=1 走 SDPA 路径，数值等价、稍慢）。
+- **FA3 wheel 缓存（仿 verl-deploy 的 env-cache）**：首次编译后 wheel（stable ABI + abi3）自动上传 HF dataset 仓 `HF_CACHE_REPO`（默认 `xiefan46/lingbot-env-cache`，公开）；setup_env.sh 优先下载缓存，未命中才编译。上传需 write token（`hf auth login`）；`FA3_REBUILD=1` 强制重编。
 - 上游 pin `torch==2.12.0.dev20260220+cu130`；MoE 默认后端 `grouped_mm` 依赖 `torch._grouped_mm`。
 - 单卡禁开 refiner（同尺寸 30B ×2 放不下）；禁用 `sglang_triton_fp8` 省显存（运行时量化会额外缓存，显存反增）。
 - text encoder（Qwen3-VL-4B）默认 FA3 → 脚本保守默认 `LINGBOT_QWEN_ATTN_IMPLEMENTATION=sdpa`，FA3 装好后可改回 `flash_attention_3`。

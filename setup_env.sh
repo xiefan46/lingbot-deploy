@@ -19,6 +19,11 @@
 #   FORCE_TORCH_FALLBACK=1 bash setup_env.sh        # 跳过 nightly 直接装稳定版 torch
 #   SKIP_FA3=1 bash setup_env.sh                    # 跳过 FA3 编译（届时运行必须 BATCH_CFG=0）
 #   FA3_MAX_JOBS=8 bash setup_env.sh                # FA3 编译并行度（默认 16，内存紧张时调小）
+#   HF_CACHE_REPO=user/repo bash setup_env.sh       # FA3 wheel 缓存仓（默认 xiefan46/lingbot-env-cache）
+#   FA3_REBUILD=1 bash setup_env.sh                 # 忽略 HF 缓存，强制重新编译
+#
+# FA3 缓存（仿 verl-deploy）：首次源码编译后 wheel 自动上传 HF 缓存仓（上传需要 write token，
+# hf auth login 一次即可；仓库默认公开，下载免 token），之后的新 pod 直接下载 wheel 秒装。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -96,68 +101,139 @@ grep -vE '^(--extra-index-url|torch==|torchvision==)' "${LINGBOT_REPO}/requireme
 "$PIP" install -qU huggingface_hub hf_transfer
 
 # ─── 6. FlashAttention-3（Hopper 专用；DiT 在 batch_cfg/packed 注意力路径硬依赖
-#        flash_attn_interface，但上游 requirements 没带它，只能源码编译） ───
-if [ "${SKIP_FA3:-}" = "1" ]; then
-    warn "SKIP_FA3=1: 跳过 FA3 编译。运行脚本时必须 BATCH_CFG=0（B=1 走 SDPA，不需要 FA3）"
-elif "$PY" -c "import flash_attn_interface" 2>/dev/null; then
-    log "flash_attn_interface (FA3) 已安装，跳过编译"
-else
+#        flash_attn_interface，但上游 requirements 没带它。仿 verl-deploy 的缓存策略：
+#        源码编译一次 → wheel 上传 HF 缓存仓（stable ABI + abi3，可跨 torch/python 小版本
+#        复用）→ 之后的 pod 直接下载 wheel 秒装，不再重编。 ───
+HF_CACHE_REPO="${HF_CACHE_REPO:-xiefan46/lingbot-env-cache}"
+FA_DIR="${WORK_DIR}/flash-attention"
+
+_fa3_cache_path() {
+    local cu
+    cu=$("$PY" -c "import torch; print((torch.version.cuda or '0').split('.')[0])")
+    echo "fa3/torch-cu${cu}"
+}
+
+# torch 的 cpp_extension 要求 nvcc 与 torch 的 CUDA 大版本一致（如 torch cu13.0 配 nvcc 13.x），
+# 否则直接 RuntimeError。先在本机找匹配的 nvcc，找不到就从 NVIDIA apt 源装一个（~4GB，几分钟）。
+_fa3_pick_cuda_home() {
+    local torch_cuda torch_major d v
     torch_cuda=$("$PY" -c "import torch; print(torch.version.cuda or '')")
-    torch_cuda_major=${torch_cuda%%.*}
+    torch_major=${torch_cuda%%.*}
+    for d in "/usr/local/cuda-${torch_cuda}" /usr/local/cuda-* /usr/local/cuda; do
+        [ -x "${d}/bin/nvcc" ] || continue
+        v=$("${d}/bin/nvcc" --version | grep -oE 'release [0-9]+' | grep -oE '[0-9]+' | head -1)
+        [ "$v" = "$torch_major" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
 
-    # torch 的 cpp_extension 要求 nvcc 与 torch 的 CUDA 大版本一致（如 torch cu13.0 配 nvcc 13.x），
-    # 否则直接 RuntimeError。先在本机找匹配的 nvcc，找不到就从 NVIDIA apt 源装一个（~4GB，几分钟）。
-    pick_cuda_home() {
-        local d v
-        for d in "/usr/local/cuda-${torch_cuda}" /usr/local/cuda-* /usr/local/cuda; do
-            [ -x "${d}/bin/nvcc" ] || continue
-            v=$("${d}/bin/nvcc" --version | grep -oE 'release [0-9]+' | grep -oE '[0-9]+' | head -1)
-            [ "$v" = "$torch_cuda_major" ] && { echo "$d"; return 0; }
-        done
-        return 1
-    }
-    CUDA_HOME_MATCHED=$(pick_cuda_home || true)
-    if [ -z "$CUDA_HOME_MATCHED" ]; then
-        . /etc/os-release
-        distro="ubuntu${VERSION_ID//./}"
-        toolkit_pkg="cuda-toolkit-${torch_cuda_major}-${torch_cuda#*.}"
-        log "镜像没有与 torch CUDA ${torch_cuda} 匹配的 nvcc，从 NVIDIA apt 源安装 ${toolkit_pkg}（~4GB）..."
-        # 多数 CUDA 基础镜像已配好 NVIDIA cuda 源——已有就直接用；重复装 cuda-keyring
-        # 会让同一源出现两条 Signed-By 不一致的配置，apt 直接报错。
-        if ! grep -rqs "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-            wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
-                && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
-                || err "cuda-keyring 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
-        fi
-        if ! apt-get update -qq 2>/tmp/apt_update.err; then
-            if grep -q "Signed-By" /tmp/apt_update.err; then
-                warn "apt cuda 源 Signed-By 冲突（镜像自带源 + cuda-keyring 重复），移除 keyring 加的重复条目后重试"
-                rm -f "/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
-                apt-get update -qq || { cat /tmp/apt_update.err >&2; err "apt update 仍失败"; }
-            else
-                cat /tmp/apt_update.err >&2
-                err "apt update 失败"
-            fi
-        fi
-        apt-get install -y -qq "$toolkit_pkg" \
-            || err "${toolkit_pkg} 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
-        CUDA_HOME_MATCHED=$(pick_cuda_home) || err "toolkit 装完仍找不到匹配的 nvcc"
+_fa3_ensure_toolkit() {
+    CUDA_HOME_MATCHED=$(_fa3_pick_cuda_home || true)
+    if [ -n "$CUDA_HOME_MATCHED" ]; then
+        log "使用 nvcc: ${CUDA_HOME_MATCHED}/bin/nvcc"
+        return 0
     fi
-    log "使用 nvcc: ${CUDA_HOME_MATCHED}/bin/nvcc（匹配 torch CUDA ${torch_cuda}）"
+    local torch_cuda distro toolkit_pkg
+    torch_cuda=$("$PY" -c "import torch; print(torch.version.cuda or '')")
+    . /etc/os-release
+    distro="ubuntu${VERSION_ID//./}"
+    toolkit_pkg="cuda-toolkit-${torch_cuda%%.*}-${torch_cuda#*.}"
+    log "镜像没有与 torch CUDA ${torch_cuda} 匹配的 nvcc，从 NVIDIA apt 源安装 ${toolkit_pkg}（~4GB）..."
+    # 多数 CUDA 基础镜像已配好 NVIDIA cuda 源——已有就直接用；重复装 cuda-keyring
+    # 会让同一源出现两条 Signed-By 不一致的配置，apt 直接报错。
+    if ! grep -rqs "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
+            && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
+            || err "cuda-keyring 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
+    fi
+    if ! apt-get update -qq 2>/tmp/apt_update.err; then
+        if grep -q "Signed-By" /tmp/apt_update.err; then
+            warn "apt cuda 源 Signed-By 冲突（镜像自带源 + cuda-keyring 重复），移除 keyring 加的重复条目后重试"
+            rm -f "/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
+            apt-get update -qq || { cat /tmp/apt_update.err >&2; err "apt update 仍失败"; }
+        else
+            cat /tmp/apt_update.err >&2
+            err "apt update 失败"
+        fi
+    fi
+    apt-get install -y -qq "$toolkit_pkg" \
+        || err "${toolkit_pkg} 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
+    CUDA_HOME_MATCHED=$(_fa3_pick_cuda_home) || err "toolkit 装完仍找不到匹配的 nvcc"
+    log "使用 nvcc: ${CUDA_HOME_MATCHED}/bin/nvcc"
+}
 
+# 编译/打包 wheel，路径写入 FA3_WHL。ninja 有编译缓存：全新 20-40 分钟，增量打包 1-2 分钟。
+_fa3_build_wheel() {
+    _fa3_ensure_toolkit
     "$PIP" install -q ninja packaging
-    FA_DIR="${WORK_DIR}/flash-attention"
     [ -d "${FA_DIR}/.git" ] || git clone https://github.com/Dao-AILab/flash-attention.git "$FA_DIR"
-    log "源码编译 FlashAttention-3 (hopper/)，MAX_JOBS=${FA3_MAX_JOBS:-16}，约 20-40 分钟..."
+    log "编译/打包 FlashAttention-3 wheel（MAX_JOBS=${FA3_MAX_JOBS:-16}）..."
     SECONDS=0
     # PATH 里带上 venv/bin：让 torch 找到 pip 装的 ninja（否则退化成单线程 distutils，慢一个数量级）
     (cd "${FA_DIR}/hopper" \
+        && rm -rf dist \
         && CUDA_HOME="$CUDA_HOME_MATCHED" \
            PATH="${CUDA_HOME_MATCHED}/bin:${VENV_DIR}/bin:${PATH}" \
            MAX_JOBS="${FA3_MAX_JOBS:-16}" \
-           "$PY" setup.py install)
-    "$PY" -c "import flash_attn_interface" 2>/dev/null || err "FA3 编译安装失败（看上方编译输出）。临时绕过: SKIP_FA3=1 重跑本脚本，运行时 BATCH_CFG=0"
-    log "FA3 编译完成 (${SECONDS}s)"
+           "$PY" setup.py bdist_wheel)
+    FA3_WHL=$(ls "${FA_DIR}/hopper/dist/"*.whl 2>/dev/null | head -1)
+    [ -n "$FA3_WHL" ] || err "FA3 wheel 打包失败（看上方编译输出）。临时绕过: SKIP_FA3=1 重跑本脚本，运行时 BATCH_CFG=0"
+    log "wheel 就绪 (${SECONDS}s): ${FA3_WHL}"
+}
+
+_fa3_upload_wheel() {
+    local whl="$1" sub
+    sub=$(_fa3_cache_path)
+    if "$PY" - "$whl" "$HF_CACHE_REPO" "$sub" <<'UPLOADEOF'
+import os, sys
+from huggingface_hub import HfApi
+whl, repo, sub = sys.argv[1], sys.argv[2], sys.argv[3]
+api = HfApi()
+private = os.environ.get("HF_CACHE_PRIVATE", "0") == "1"
+api.create_repo(repo, repo_type="dataset", private=private, exist_ok=True)
+api.upload_file(path_or_fileobj=whl, path_in_repo=f"{sub}/{os.path.basename(whl)}",
+                repo_id=repo, repo_type="dataset")
+print(f"uploaded: {repo}/{sub}/{os.path.basename(whl)}")
+UPLOADEOF
+    then
+        log "FA3 wheel 已上传缓存仓 ${HF_CACHE_REPO}，之后的 pod 会直接秒装"
+    else
+        warn "上传 HF 缓存失败（需要 write 权限 token：先 hf auth login 或 export HF_TOKEN=hf_xxx，再重跑本脚本补传）"
+        warn "手动补传: hf upload --repo-type dataset ${HF_CACHE_REPO} ${whl} ${sub}/$(basename "$whl")"
+    fi
+}
+
+if [ "${SKIP_FA3:-}" = "1" ]; then
+    warn "SKIP_FA3=1: 跳过 FA3。运行脚本时必须 BATCH_CFG=0（B=1 走 SDPA，不需要 FA3）"
+elif "$PY" -c "import flash_attn_interface" 2>/dev/null; then
+    log "flash_attn_interface (FA3) 已安装"
+    # 已装但缓存 wheel 还没打包/上传过（比如老版脚本 setup.py install 装的）→ 增量打包并上传
+    if [ "${FA3_NO_CACHE:-}" != "1" ] && [ -d "${FA_DIR}/hopper/build" ] && ! ls "${FA_DIR}/hopper/dist/"*.whl >/dev/null 2>&1; then
+        log "检测到本地编译产物但缓存 wheel 缺失，增量打包上传（ninja 缓存，~1-2 分钟）..."
+        _fa3_build_wheel
+        _fa3_upload_wheel "$FA3_WHL"
+    fi
+else
+    # 1) 先试 HF 缓存的 wheel
+    if [ "${FA3_REBUILD:-}" != "1" ]; then
+        FA3_SUB=$(_fa3_cache_path)
+        FA3_CACHE_DIR="${WORK_DIR}/fa3-wheel-cache"
+        if "$HF_BIN" download --repo-type dataset "$HF_CACHE_REPO" --include "${FA3_SUB}/*.whl" --local-dir "$FA3_CACHE_DIR" >/dev/null 2>&1 \
+            && ls "${FA3_CACHE_DIR}/${FA3_SUB}/"*.whl >/dev/null 2>&1; then
+            log "命中 HF 缓存（${HF_CACHE_REPO}/${FA3_SUB}），直接安装 wheel"
+            "$PIP" install -q "${FA3_CACHE_DIR}/${FA3_SUB}/"*.whl
+        else
+            log "HF 缓存未命中，走源码编译（编完会自动上传缓存）"
+        fi
+    fi
+    # 2) 缓存没救到 → 源码编译 wheel + 安装 + 上传
+    if ! "$PY" -c "import flash_attn_interface" 2>/dev/null; then
+        _fa3_build_wheel
+        "$PIP" install -q "$FA3_WHL"
+        "$PY" -c "import flash_attn_interface" 2>/dev/null \
+            || err "FA3 安装后 import 仍失败（看上方输出）。临时绕过: SKIP_FA3=1 重跑本脚本，运行时 BATCH_CFG=0"
+        [ "${FA3_NO_CACHE:-}" != "1" ] && _fa3_upload_wheel "$FA3_WHL"
+    fi
 fi
 
 # ─── 7. 验证 ───
