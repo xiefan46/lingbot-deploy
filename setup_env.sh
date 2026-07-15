@@ -122,10 +122,24 @@ else
         distro="ubuntu${VERSION_ID//./}"
         toolkit_pkg="cuda-toolkit-${torch_cuda_major}-${torch_cuda#*.}"
         log "镜像没有与 torch CUDA ${torch_cuda} 匹配的 nvcc，从 NVIDIA apt 源安装 ${toolkit_pkg}（~4GB）..."
-        wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
-            && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
-            && apt-get update -qq \
-            && apt-get install -y -qq "$toolkit_pkg" \
+        # 多数 CUDA 基础镜像已配好 NVIDIA cuda 源——已有就直接用；重复装 cuda-keyring
+        # 会让同一源出现两条 Signed-By 不一致的配置，apt 直接报错。
+        if ! grep -rqs "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+            wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
+                && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
+                || err "cuda-keyring 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
+        fi
+        if ! apt-get update -qq 2>/tmp/apt_update.err; then
+            if grep -q "Signed-By" /tmp/apt_update.err; then
+                warn "apt cuda 源 Signed-By 冲突（镜像自带源 + cuda-keyring 重复），移除 keyring 加的重复条目后重试"
+                rm -f "/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
+                apt-get update -qq || { cat /tmp/apt_update.err >&2; err "apt update 仍失败"; }
+            else
+                cat /tmp/apt_update.err >&2
+                err "apt update 失败"
+            fi
+        fi
+        apt-get install -y -qq "$toolkit_pkg" \
             || err "${toolkit_pkg} 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
         CUDA_HOME_MATCHED=$(pick_cuda_home) || err "toolkit 装完仍找不到匹配的 nvcc"
     fi
