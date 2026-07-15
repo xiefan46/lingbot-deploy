@@ -93,7 +93,7 @@ log "安装其余依赖..."
 grep -vE '^(--extra-index-url|torch==|torchvision==)' "${LINGBOT_REPO}/requirements.txt" > /tmp/lingbot_reqs.txt
 "$PIP" install -q -r /tmp/lingbot_reqs.txt
 "$PIP" install -q -e "$LINGBOT_REPO"
-"$PIP" install -qU "huggingface_hub[cli]" hf_transfer
+"$PIP" install -qU huggingface_hub hf_transfer
 
 # ─── 6. FlashAttention-3（Hopper 专用；DiT 在 batch_cfg/packed 注意力路径硬依赖
 #        flash_attn_interface，但上游 requirements 没带它，只能源码编译） ───
@@ -102,16 +102,46 @@ if [ "${SKIP_FA3:-}" = "1" ]; then
 elif "$PY" -c "import flash_attn_interface" 2>/dev/null; then
     log "flash_attn_interface (FA3) 已安装，跳过编译"
 else
-    command -v nvcc &>/dev/null || err "缺少 nvcc（FA3 必须源码编译，需要 devel 镜像）。换带 CUDA toolkit 的模板，或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
-    nvcc_ver=$(nvcc --version | grep -oE 'release [0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)
-    torch_cuda=$("$PY" -c "import torch; print(torch.version.cuda or '?')")
-    [ "${nvcc_ver%%.*}" = "${torch_cuda%%.*}" ] || warn "nvcc(${nvcc_ver}) 与 torch CUDA(${torch_cuda}) 大版本不一致，编译可能失败——失败就换 CUDA 版本匹配的镜像，或 FORCE_TORCH_FALLBACK=1 重装 torch 后再试"
-    log "源码编译 FlashAttention-3 (hopper/)，nvcc ${nvcc_ver}，MAX_JOBS=${FA3_MAX_JOBS:-16}，约 20-60 分钟..."
+    torch_cuda=$("$PY" -c "import torch; print(torch.version.cuda or '')")
+    torch_cuda_major=${torch_cuda%%.*}
+
+    # torch 的 cpp_extension 要求 nvcc 与 torch 的 CUDA 大版本一致（如 torch cu13.0 配 nvcc 13.x），
+    # 否则直接 RuntimeError。先在本机找匹配的 nvcc，找不到就从 NVIDIA apt 源装一个（~4GB，几分钟）。
+    pick_cuda_home() {
+        local d v
+        for d in "/usr/local/cuda-${torch_cuda}" /usr/local/cuda-* /usr/local/cuda; do
+            [ -x "${d}/bin/nvcc" ] || continue
+            v=$("${d}/bin/nvcc" --version | grep -oE 'release [0-9]+' | grep -oE '[0-9]+' | head -1)
+            [ "$v" = "$torch_cuda_major" ] && { echo "$d"; return 0; }
+        done
+        return 1
+    }
+    CUDA_HOME_MATCHED=$(pick_cuda_home || true)
+    if [ -z "$CUDA_HOME_MATCHED" ]; then
+        . /etc/os-release
+        distro="ubuntu${VERSION_ID//./}"
+        toolkit_pkg="cuda-toolkit-${torch_cuda_major}-${torch_cuda#*.}"
+        log "镜像没有与 torch CUDA ${torch_cuda} 匹配的 nvcc，从 NVIDIA apt 源安装 ${toolkit_pkg}（~4GB）..."
+        wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
+            && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
+            && apt-get update -qq \
+            && apt-get install -y -qq "$toolkit_pkg" \
+            || err "${toolkit_pkg} 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
+        CUDA_HOME_MATCHED=$(pick_cuda_home) || err "toolkit 装完仍找不到匹配的 nvcc"
+    fi
+    log "使用 nvcc: ${CUDA_HOME_MATCHED}/bin/nvcc（匹配 torch CUDA ${torch_cuda}）"
+
     "$PIP" install -q ninja packaging
     FA_DIR="${WORK_DIR}/flash-attention"
     [ -d "${FA_DIR}/.git" ] || git clone https://github.com/Dao-AILab/flash-attention.git "$FA_DIR"
+    log "源码编译 FlashAttention-3 (hopper/)，MAX_JOBS=${FA3_MAX_JOBS:-16}，约 20-40 分钟..."
     SECONDS=0
-    (cd "${FA_DIR}/hopper" && MAX_JOBS="${FA3_MAX_JOBS:-16}" "$PY" setup.py install)
+    # PATH 里带上 venv/bin：让 torch 找到 pip 装的 ninja（否则退化成单线程 distutils，慢一个数量级）
+    (cd "${FA_DIR}/hopper" \
+        && CUDA_HOME="$CUDA_HOME_MATCHED" \
+           PATH="${CUDA_HOME_MATCHED}/bin:${VENV_DIR}/bin:${PATH}" \
+           MAX_JOBS="${FA3_MAX_JOBS:-16}" \
+           "$PY" setup.py install)
     "$PY" -c "import flash_attn_interface" 2>/dev/null || err "FA3 编译安装失败（看上方编译输出）。临时绕过: SKIP_FA3=1 重跑本脚本，运行时 BATCH_CFG=0"
     log "FA3 编译完成 (${SECONDS}s)"
 fi
