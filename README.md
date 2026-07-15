@@ -2,6 +2,8 @@
 
 在 **RunPod H200 单卡**上部署 [LingBot-Video](https://github.com/Robbyant/lingbot-video)（30B-A3B MoE 视频生成模型，arXiv 2607.07675）做推理与显存实测。
 
+代码统一用我们的实验 fork **[xiefan46/lingbot-video](https://github.com/xiefan46/lingbot-video)**（`setup_env.sh` 默认从 fork clone，实验改动都提交到 fork；上游是 Robbyant/lingbot-video）。
+
 背景调研见 serving 仓库的 `research/2026-07-15-lingbot-video-serving-analysis.md`（架构/显存预算分析）。本仓库的目标：**验证 30B MoE bf16 单卡部署，并实测显存峰值/耗时来校准预算表**。
 
 ## RunPod 开机配置

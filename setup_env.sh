@@ -26,7 +26,9 @@ source "${SCRIPT_DIR}/common.sh"
 TORCH_PIN="torch==2.12.0.dev20260220+cu130"
 TORCHVISION_PIN="torchvision==0.26.0.dev20260220+cu130"
 NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/cu130"
-LINGBOT_GIT="${LINGBOT_GIT:-https://github.com/Robbyant/lingbot-video.git}"
+# 统一用实验 fork（xiefan46/lingbot-video，公开仓库，pod 上 HTTPS 匿名可 clone）；
+# 需要原版时: LINGBOT_GIT=https://github.com/Robbyant/lingbot-video.git bash setup_env.sh
+LINGBOT_GIT="${LINGBOT_GIT:-https://github.com/xiefan46/lingbot-video.git}"
 
 command -v nvidia-smi &>/dev/null || err "未检测到 nvidia-smi，请在 GPU pod 上运行"
 python3 -c 'import sys; assert sys.version_info >= (3,10)' 2>/dev/null \

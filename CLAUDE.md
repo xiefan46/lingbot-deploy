@@ -10,6 +10,7 @@ RunPod H200 单卡部署 LingBot-Video（30B-A3B MoE，arXiv 2607.07675）的脚
 
 ## 约定
 
+- **lingbot-video 代码统一用实验 fork [xiefan46/lingbot-video](https://github.com/xiefan46/lingbot-video)**（`setup_env.sh` 默认 clone 它，实验改动提交到 fork）；上游 Robbyant/lingbot-video 只作跟进合并来源。
 - 脚本风格参照 [xiefan46/verl-deploy](https://github.com/xiefan46/verl-deploy)：中文注释、幂等、彩色 log（`common.sh`）、末尾验证块。
 - 磁盘布局同 verl-deploy：**重 I/O（venv/上游仓库/权重）放本地 NVMe `/root/lingbot`，不放 `/workspace` 网络卷**（网络卷 I/O 慢）。pod stop 清空容器盘，重跑 `setup_env.sh` + `download_models.sh` 恢复。实验产物（小文件）默认写 `/workspace/lingbot-outputs/` 防丢，无卷时回落本地。
 - 所有运行参数用环境变量覆盖，不改脚本本体。
