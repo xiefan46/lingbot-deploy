@@ -1,0 +1,7 @@
+outputs/
+models/
+*.log
+gpu_mem.csv
+__pycache__/
+.venv/
+.DS_Store

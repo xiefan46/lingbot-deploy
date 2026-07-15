@@ -1,0 +1,22 @@
+# lingbot-deploy
+
+RunPod H200 单卡部署 LingBot-Video（30B-A3B MoE，arXiv 2607.07675）的脚本仓库。
+
+## 背景
+
+- 母项目是本地 `serving` 调研仓库（研究 30–50B 具身 MoE 世界模型的单卡部署）；LingBot-Video 是第一个参照系统。
+- 架构与显存分析见 serving 仓库 `research/2026-07-15-lingbot-video-serving-analysis.md`；本仓库负责把分析落地成 RunPod 上可一键执行的部署与实测脚本。
+- 目标：跑通 30B MoE bf16 单卡推理，实测显存峰值/耗时，回填校准调研文档的显存预算表。
+
+## 约定
+
+- 脚本风格参照 [xiefan46/verl-deploy](https://github.com/xiefan46/verl-deploy)：中文注释、幂等、彩色 log（`common.sh`）、末尾验证块。
+- RunPod 上一切可持久化的东西（venv/上游仓库/权重/输出）都放 `/workspace/lingbot`（持久卷）；pod 重启后重跑 `setup_env.sh` 恢复。
+- 所有运行参数用环境变量覆盖，不改脚本本体。
+- 新增实验脚本时同步更新 README 的文件说明表。
+
+## 关键技术事实（改脚本前必读）
+
+- 上游 pin `torch==2.12.0.dev20260220+cu130`；MoE 默认后端 `grouped_mm` 依赖 `torch._grouped_mm`。
+- 单卡禁开 refiner（同尺寸 30B ×2 放不下）；禁用 `sglang_triton_fp8` 省显存（运行时量化会额外缓存，显存反增）。
+- text encoder（Qwen3-VL-4B）默认 FA3 但环境未装 → 脚本统一 `LINGBOT_QWEN_ATTN_IMPLEMENTATION=sdpa`。
