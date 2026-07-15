@@ -16,7 +16,8 @@
 ## 快速开始
 
 ```bash
-cd /workspace && git clone git@github.com:xiefan46/lingbot-deploy.git && cd lingbot-deploy
+# pod 上没有 GitHub SSH key，统一用 HTTPS clone（本仓库是公开的，无需 token）
+cd /workspace && git clone https://github.com/xiefan46/lingbot-deploy.git && cd lingbot-deploy
 
 bash setup_env.sh              # 环境（clone 上游 + venv + torch + 依赖 + 验证）
 bash download_models.sh dense  # 1.3B, ~12GB
