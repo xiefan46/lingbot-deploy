@@ -42,9 +42,11 @@ bash run_moe_t2v.sh            # 正菜：30B MoE 单卡 480p T2V
 | MoE DiT 权重 (bf16) | 60.3 GB |
 | 文本编码器 Qwen3-VL-4B (bf16) | 8.9 GB |
 | VAE (fp32) | ~1 GB |
-| 480p×121帧 激活/工作区（batch_cfg 开） | ~10–15 GB |
-| **预期峰值 (H200)** | **~80–90 GiB / 141 GiB** |
+| 480p×121帧 激活/工作区（batch_cfg 开） | ~10–15 GB（**dense 实测 ~17 GB**） |
+| **预期峰值 (H200)** | **~85–92 GiB / 141 GiB** |
 | 耗时（5s@480p，40 步，H200，估） | ~2–4 min/条 + 首次加载数分钟 |
+
+**实测（2026-07-15，H200）**：Dense 1.3B + batch_cfg：峰值 **29.2 GiB**（去噪期达平台，权重 ~12.5GB + 工作区 ~17GB），去噪 2.55 s/步 ×40，全程 ~7 分钟含加载。MoE 30B 待补。原始数据在 HF `xiefan46/lingbot-env-cache` 的 `outputs/`。
 
 ## 显存不够时的旋钮（80GB 卡参考）
 
