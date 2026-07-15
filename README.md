@@ -23,7 +23,7 @@
 # pod 上没有 GitHub SSH key，统一用 HTTPS clone（本仓库是公开的，无需 token）
 cd /root && git clone https://github.com/xiefan46/lingbot-deploy.git && cd lingbot-deploy
 
-bash setup_env.sh              # 环境（clone 上游 + venv + torch + 依赖 + 验证）
+bash setup_env.sh              # 环境 + FA3 源码编译（首次 ~30-60 分钟，建议 tmux 里跑）
 bash download_models.sh dense  # 1.3B, ~12GB
 bash run_dense_t2v.sh          # 冒烟：验证全链路，峰值 ~15GiB
 
@@ -60,10 +60,11 @@ NUM_FRAMES=49 bash run_moe_t2v.sh                                 # 5s→2s（�
 ## 已知坑
 
 1. **torch 版本**：上游 pin 了 `torch==2.12.0.dev20260220+cu130`（nightly）。`setup_env.sh` 会检测驱动 CUDA 版本，装不上时自动回退最新稳定版；回退后注意验证输出里的 `torch._grouped_mm` 检查（MoE 默认后端依赖它，缺失时装 `requirements-sglang.txt` 后改用 `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton`）。
-2. **text encoder 注意力**：上游默认 `flash_attention_3`，但 FA3 需要单独编译且 requirements 里没有——运行脚本已默认改为 `sdpa`（文本编码只占总时长很小一部分，无感）。
-3. **不要开 refiner**（`--run_refiner`）：refiner 是**同尺寸的另一个 30B DiT**，双模型 120GB 权重 + 1080p 工作区，单卡（含 H200）放不下。上游 refiner 方案是 8 卡 CP8+FSDP。
-4. **不要用 `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8` 来省显存**：开源实现是运行时量化+额外缓存，bf16 权重不释放，显存反增 ~29GB（它是多卡 FSDP 下的提速方案）。单卡省显存只能用默认 `grouped_mm`。
-5. **rewriter 不用部署**：冒烟用上游自带的结构化 prompt（`assets/cases/`）。要用自己的 prompt 时才需要 Qwen3.6-27B rewriter（bf16 ~54GB，届时单独规划）。
+2. **FlashAttention-3 是隐性硬依赖**：DiT 在 `--batch_cfg`（batch>1 走 packed 注意力）或 context parallel 下强制要求 FA3（`flash_attn_interface`），但上游 requirements 没带它，干净环境下上游单卡脚本默认参数必报 `flash_attn_interface.flash_attn_varlen_func is required`。`setup_env.sh` 会在 Hopper 上源码编译安装（~20–60 分钟，需要 devel 镜像的 nvcc；并行度 `FA3_MAX_JOBS` 默认 16）。编译失败或 `SKIP_FA3=1` 跳过时的绕过：运行加 **`BATCH_CFG=0`**——B=1 走 SDPA 路径，完全不需要 FA3，代价是 CFG 两分支串行、稍慢。约定：**不改上游模型代码**，依赖问题一律在部署层解决。
+3. **text encoder 注意力**：上游默认 `flash_attention_3`；运行脚本保守默认 `sdpa`（文本编码只占总时长很小一部分）。FA3 装好后想对齐上游：`LINGBOT_QWEN_ATTN_IMPLEMENTATION=flash_attention_3`。
+4. **不要开 refiner**（`--run_refiner`）：refiner 是**同尺寸的另一个 30B DiT**，双模型 120GB 权重 + 1080p 工作区，单卡（含 H200）放不下。上游 refiner 方案是 8 卡 CP8+FSDP。
+5. **不要用 `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8` 来省显存**：开源实现是运行时量化+额外缓存，bf16 权重不释放，显存反增 ~29GB（它是多卡 FSDP 下的提速方案）。单卡省显存只能用默认 `grouped_mm`。
+6. **rewriter 不用部署**：冒烟用上游自带的结构化 prompt（`assets/cases/`）。要用自己的 prompt 时才需要 Qwen3.6-27B rewriter（bf16 ~54GB，届时单独规划）。
 
 ## 文件说明
 

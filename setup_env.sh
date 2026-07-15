@@ -7,7 +7,8 @@
 #   3. python venv → ${WORK_DIR}/.venv
 #   4. 安装 torch：优先上游 pin 的 cu130 nightly；驱动不支持或 nightly 已下架则回退最新稳定版
 #   5. 其余依赖 + lingbot_video (editable) + HF CLI
-#   6. 验证（CUDA / GPU / torch._grouped_mm / 关键 import）
+#   6. 源码编译 FlashAttention-3（Hopper；DiT 的 batch_cfg/packed 注意力硬依赖，~20-60 分钟）
+#   7. 验证（CUDA / GPU / torch._grouped_mm / FA3 / 关键 import）
 #
 # 磁盘布局：默认全放 /root/lingbot（本地 NVMe，快）。pod stop 后容器盘清空，重跑本
 # 脚本即恢复（幂等，~5 分钟）。/workspace 网络卷 I/O 慢，只用来存实验产物（见 common.sh）。
@@ -16,6 +17,8 @@
 #   bash setup_env.sh
 #   WORK_DIR=/workspace/lingbot bash setup_env.sh   # 改放持久卷（全持久化但 I/O 慢）
 #   FORCE_TORCH_FALLBACK=1 bash setup_env.sh        # 跳过 nightly 直接装稳定版 torch
+#   SKIP_FA3=1 bash setup_env.sh                    # 跳过 FA3 编译（届时运行必须 BATCH_CFG=0）
+#   FA3_MAX_JOBS=8 bash setup_env.sh                # FA3 编译并行度（默认 16，内存紧张时调小）
 
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -92,7 +95,28 @@ grep -vE '^(--extra-index-url|torch==|torchvision==)' "${LINGBOT_REPO}/requireme
 "$PIP" install -q -e "$LINGBOT_REPO"
 "$PIP" install -qU "huggingface_hub[cli]" hf_transfer
 
-# ─── 6. 验证 ───
+# ─── 6. FlashAttention-3（Hopper 专用；DiT 在 batch_cfg/packed 注意力路径硬依赖
+#        flash_attn_interface，但上游 requirements 没带它，只能源码编译） ───
+if [ "${SKIP_FA3:-}" = "1" ]; then
+    warn "SKIP_FA3=1: 跳过 FA3 编译。运行脚本时必须 BATCH_CFG=0（B=1 走 SDPA，不需要 FA3）"
+elif "$PY" -c "import flash_attn_interface" 2>/dev/null; then
+    log "flash_attn_interface (FA3) 已安装，跳过编译"
+else
+    command -v nvcc &>/dev/null || err "缺少 nvcc（FA3 必须源码编译，需要 devel 镜像）。换带 CUDA toolkit 的模板，或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
+    nvcc_ver=$(nvcc --version | grep -oE 'release [0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    torch_cuda=$("$PY" -c "import torch; print(torch.version.cuda or '?')")
+    [ "${nvcc_ver%%.*}" = "${torch_cuda%%.*}" ] || warn "nvcc(${nvcc_ver}) 与 torch CUDA(${torch_cuda}) 大版本不一致，编译可能失败——失败就换 CUDA 版本匹配的镜像，或 FORCE_TORCH_FALLBACK=1 重装 torch 后再试"
+    log "源码编译 FlashAttention-3 (hopper/)，nvcc ${nvcc_ver}，MAX_JOBS=${FA3_MAX_JOBS:-16}，约 20-60 分钟..."
+    "$PIP" install -q ninja packaging
+    FA_DIR="${WORK_DIR}/flash-attention"
+    [ -d "${FA_DIR}/.git" ] || git clone https://github.com/Dao-AILab/flash-attention.git "$FA_DIR"
+    SECONDS=0
+    (cd "${FA_DIR}/hopper" && MAX_JOBS="${FA3_MAX_JOBS:-16}" "$PY" setup.py install)
+    "$PY" -c "import flash_attn_interface" 2>/dev/null || err "FA3 编译安装失败（看上方编译输出）。临时绕过: SKIP_FA3=1 重跑本脚本，运行时 BATCH_CFG=0"
+    log "FA3 编译完成 (${SECONDS}s)"
+fi
+
+# ─── 7. 验证 ───
 log "验证环境..."
 "$PY" - <<'EOF'
 import torch
@@ -105,6 +129,11 @@ if hasattr(torch, "_grouped_mm"):
     print("torch._grouped_mm: OK（MoE 默认 grouped_mm 后端可用）")
 else:
     print("WARN: torch._grouped_mm 缺失 — 跑 MoE 需换 torch 版本，或安装 requirements-sglang.txt 后用 LINGBOT_MOE_EXPERT_BACKEND=sglang_triton")
+try:
+    import flash_attn_interface  # noqa: F401
+    print("flash_attn_interface (FA3): OK（batch_cfg/packed 注意力可用）")
+except Exception:
+    print("WARN: FA3 缺失 — 默认 batch_cfg 路径会报 flash_attn_varlen_func required，运行时加 BATCH_CFG=0")
 import diffusers, transformers
 print(f"diffusers: {diffusers.__version__}, transformers: {transformers.__version__}")
 import lingbot_video
