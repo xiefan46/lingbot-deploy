@@ -11,12 +11,23 @@ log()  { echo -e "${GREEN}[$(date +%H:%M:%S)]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] WARN:${RESET} $*"; }
 err()  { echo -e "${RED}[$(date +%H:%M:%S)] ERROR:${RESET} $*"; exit 1; }
 
-# ─── 路径约定（RunPod: /workspace 是持久卷，pod 重启不丢，venv/权重都放这里） ───
-WORK_DIR="${WORK_DIR:-/workspace/lingbot}"
+# ─── 路径约定（同 verl-deploy：重 I/O 放本地盘，不放 /workspace 网络卷） ───
+# RunPod 的 /workspace 是网络卷：venv 的海量小文件 import 慢、60GB 权重加载慢数倍。
+# 因此 venv/上游仓库/权重默认放 /root（本地 NVMe 容器盘）。代价：pod stop 会清空
+# 容器盘，重跑 setup_env.sh + download_models.sh 即恢复（hf_transfer 重下权重约
+# 5–15 分钟）。想全持久化（慢）：WORK_DIR=/workspace/lingbot bash setup_env.sh
+WORK_DIR="${WORK_DIR:-/root/lingbot}"
 LINGBOT_REPO="${LINGBOT_REPO:-${WORK_DIR}/lingbot-video}"
 VENV_DIR="${VENV_DIR:-${WORK_DIR}/.venv}"
 MODELS_DIR="${MODELS_DIR:-${WORK_DIR}/models}"
-OUTPUTS_DIR="${OUTPUTS_DIR:-${WORK_DIR}/outputs}"
+# 实验产物（mp4/log/显存采样，都很小）优先放 /workspace 网络卷，pod stop 后不丢
+if [ -z "${OUTPUTS_DIR:-}" ]; then
+    if [ -d /workspace ]; then
+        OUTPUTS_DIR="/workspace/lingbot-outputs"
+    else
+        OUTPUTS_DIR="${WORK_DIR}/outputs"
+    fi
+fi
 
 DENSE_MODEL_DIR="${DENSE_MODEL_DIR:-${MODELS_DIR}/lingbot-video-dense-1.3b}"
 MOE_MODEL_DIR="${MOE_MODEL_DIR:-${MODELS_DIR}/lingbot-video-moe-30b-a3b}"

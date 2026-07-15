@@ -4,14 +4,17 @@
 # 流程：
 #   1. 系统工具 (git/tmux)
 #   2. clone lingbot-video → ${WORK_DIR}/lingbot-video
-#   3. python venv → ${WORK_DIR}/.venv（放持久卷，pod 重启可复用，重跑本脚本即恢复）
+#   3. python venv → ${WORK_DIR}/.venv
 #   4. 安装 torch：优先上游 pin 的 cu130 nightly；驱动不支持或 nightly 已下架则回退最新稳定版
 #   5. 其余依赖 + lingbot_video (editable) + HF CLI
 #   6. 验证（CUDA / GPU / torch._grouped_mm / 关键 import）
 #
+# 磁盘布局：默认全放 /root/lingbot（本地 NVMe，快）。pod stop 后容器盘清空，重跑本
+# 脚本即恢复（幂等，~5 分钟）。/workspace 网络卷 I/O 慢，只用来存实验产物（见 common.sh）。
+#
 # 用法:
 #   bash setup_env.sh
-#   WORK_DIR=/workspace/lingbot bash setup_env.sh   # 自定义根目录（默认即此值）
+#   WORK_DIR=/workspace/lingbot bash setup_env.sh   # 改放持久卷（全持久化但 I/O 慢）
 #   FORCE_TORCH_FALLBACK=1 bash setup_env.sh        # 跳过 nightly 直接装稳定版 torch
 
 set -euo pipefail

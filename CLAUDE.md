@@ -11,7 +11,7 @@ RunPod H200 单卡部署 LingBot-Video（30B-A3B MoE，arXiv 2607.07675）的脚
 ## 约定
 
 - 脚本风格参照 [xiefan46/verl-deploy](https://github.com/xiefan46/verl-deploy)：中文注释、幂等、彩色 log（`common.sh`）、末尾验证块。
-- RunPod 上一切可持久化的东西（venv/上游仓库/权重/输出）都放 `/workspace/lingbot`（持久卷）；pod 重启后重跑 `setup_env.sh` 恢复。
+- 磁盘布局同 verl-deploy：**重 I/O（venv/上游仓库/权重）放本地 NVMe `/root/lingbot`，不放 `/workspace` 网络卷**（网络卷 I/O 慢）。pod stop 清空容器盘，重跑 `setup_env.sh` + `download_models.sh` 恢复。实验产物（小文件）默认写 `/workspace/lingbot-outputs/` 防丢，无卷时回落本地。
 - 所有运行参数用环境变量覆盖，不改脚本本体。
 - **pod 上 clone 一律用 HTTPS**（`https://github.com/xiefan46/lingbot-deploy.git`）：RunPod pod 里没有用户的 GitHub SSH key，SSH 方式会 `Permission denied (publickey)`。本仓库公开，HTTPS 匿名可读；上游 lingbot-video 的 clone（setup_env.sh）本来就是 HTTPS。
 - 新增实验脚本时同步更新 README 的文件说明表。

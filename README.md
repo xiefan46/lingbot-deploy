@@ -9,15 +9,17 @@
 | 项 | 建议 |
 | --- | --- |
 | GPU | H200 SXM（141GB）×1；H20 96GB 也可跑 base-only |
-| Volume | **≥ 200GB**，挂载 `/workspace`（MoE 权重 121GB + dense 12GB + venv） |
+| **Container Disk** | **≥ 250GB**（本地 NVMe：venv + 两个模型 ~140GB + 余量；开 pod 时就要给够，后改麻烦） |
+| Volume | 可选，~20GB 挂 `/workspace`（只存实验产物 mp4/log/显存采样；没有也行，产物落本地记得拷走） |
 | 模板 | 任意带 NVIDIA 驱动的模板即可（如官方 PyTorch 模板）；脚本自建 venv，不依赖镜像里的 torch |
-| 注意 | 权重/venv 全落 `/workspace` 持久卷，pod 停开机后重跑 `setup_env.sh` 秒级恢复 |
+
+**磁盘布局（同 verl-deploy 的思路）**：`/workspace` 是网络卷，I/O 慢（venv 小文件 import、60GB 权重加载都吃亏），所以 venv/上游仓库/权重默认全放 `/root/lingbot`（本地 NVMe）。代价是 pod **stop 会清空容器盘**——重跑 `setup_env.sh`（~5 分钟）+ `download_models.sh`（hf_transfer 重下权重 ~5–15 分钟）即恢复。实验产物默认写到 `/workspace/lingbot-outputs/`（体积小、断电不丢）。想全持久化（慢）：`WORK_DIR=/workspace/lingbot bash setup_env.sh`。
 
 ## 快速开始
 
 ```bash
 # pod 上没有 GitHub SSH key，统一用 HTTPS clone（本仓库是公开的，无需 token）
-cd /workspace && git clone https://github.com/xiefan46/lingbot-deploy.git && cd lingbot-deploy
+cd /root && git clone https://github.com/xiefan46/lingbot-deploy.git && cd lingbot-deploy
 
 bash setup_env.sh              # 环境（clone 上游 + venv + torch + 依赖 + 验证）
 bash download_models.sh dense  # 1.3B, ~12GB
@@ -27,7 +29,7 @@ bash download_models.sh moe    # 30B, ~121GB（下载较久，建议 tmux 里跑
 bash run_moe_t2v.sh            # 正菜：30B MoE 单卡 480p T2V
 ```
 
-产物在 `/workspace/lingbot/outputs/<run>/t2v.mp4`，同目录的 `run.log` / `gpu_mem.csv` 是日志和显存采样（500ms 粒度），脚本结束时会打印**显存峰值和总耗时**。
+产物在 `/workspace/lingbot-outputs/<run>/t2v.mp4`（无 `/workspace` 卷时落在 `/root/lingbot/outputs/`），同目录的 `run.log` / `gpu_mem.csv` 是日志和显存采样（500ms 粒度），脚本结束时会打印**显存峰值和总耗时**。
 
 所有脚本支持环境变量覆盖（`HEIGHT/WIDTH/STEPS/NUM_FRAMES/PROMPT_JSON/SEED/OUT_DIR/...`），路径约定见 `common.sh`。
 

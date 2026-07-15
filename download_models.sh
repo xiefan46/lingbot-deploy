@@ -3,10 +3,10 @@
 #
 # 用法:
 #   bash download_models.sh dense   # 1.3B 冒烟测试用, ~12GB
-#   bash download_models.sh moe     # 30B-A3B, ~121GB（确保 /workspace 卷 ≥ 200GB）
+#   bash download_models.sh moe     # 30B-A3B, ~121GB（开 pod 时容器盘要给够，建议 ≥250GB）
 #   bash download_models.sh all
 #
-# 权重落盘: ${MODELS_DIR}（默认 /workspace/lingbot/models，持久卷）
+# 权重落盘: ${MODELS_DIR}（默认 /root/lingbot/models，本地 NVMe；pod stop 后清空，重跑即重下）
 
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
