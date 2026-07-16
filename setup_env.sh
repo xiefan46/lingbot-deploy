@@ -76,9 +76,19 @@ driver_cuda_major=${driver_cuda%%.*}
 log "驱动支持的 CUDA: ${driver_cuda} | GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 
 install_torch_fallback() {
-    warn "回退安装最新稳定版 torch/torchvision"
-    warn "（上游只在 pin 的 nightly 上测过；MoE 默认后端依赖 torch._grouped_mm，装完看验证输出确认）"
-    "$PIP" install -U torch torchvision
+    warn "回退安装稳定版 torch/torchvision（上游只在 pin 的 nightly 上测过；装完看验证输出的 torch._grouped_mm 确认）"
+    if [ "$driver_cuda_major" -ge 13 ]; then
+        # PyPI 默认 wheel 目前就是 cu13 构建
+        "$PIP" install -U torch torchvision
+    else
+        # 驱动只到 CUDA 12.x：PyPI 默认的 cu13 wheel 会 CUDA not available，必须装 cu12x 构建。
+        # 注意：FA3 缓存 wheel（fa3/torch-cu13）在此环境不可用——要么 SKIP_FA3=1 + 运行时
+        # BATCH_CFG=0，要么换驱动 CUDA>=13 的宿主机（RunPod 创建页可按 CUDA Version 过滤）。
+        warn "宿主机驱动仅支持 CUDA ${driver_cuda} —— 安装 cu12x 构建的 torch"
+        warn "此环境下 FA3 的 cu13 缓存 wheel 不可用：请 SKIP_FA3=1 重跑本脚本，并全程 BATCH_CFG=0 运行；官方 batch_cfg 路径请换 CUDA>=13 驱动的 pod"
+        "$PIP" install -U torch torchvision --index-url https://download.pytorch.org/whl/cu128 \
+            || "$PIP" install -U torch torchvision --index-url https://download.pytorch.org/whl/cu126
+    fi
 }
 
 if [ "${FORCE_TORCH_FALLBACK:-}" = "1" ]; then
