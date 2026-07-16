@@ -38,6 +38,9 @@ mkdir -p "$OUT_DIR"
 EXTRA_ARGS=()
 [ "$BATCH_CFG" = "1" ] && EXTRA_ARGS+=(--batch_cfg)
 [ -n "${NUM_FRAMES:-}" ] && EXTRA_ARGS+=(--num_frames "$NUM_FRAMES")
+# 注意: 自带 example prompt 含 duration 字段，runner 会用它覆盖 --num_frames——
+# 想真正改帧数用 DURATION（秒），如 DURATION=2.5 → 61 帧
+[ -n "${DURATION:-}" ] && EXTRA_ARGS+=(--duration "$DURATION")
 
 log "模型: $MODEL_DIR"
 log "输出: $OUT_DIR | prompt: $PROMPT_JSON"

@@ -46,7 +46,7 @@ bash run_moe_t2v.sh            # 正菜：30B MoE 单卡 480p T2V
 | **峰值 (H200，实测)** | **101.2 GiB / 141 GiB** |
 | 耗时（5s@480p，40 步，H200，实测） | **6.86 s/步，全程 316s ≈ 5.3 min/条** |
 
-**实测（2026-07-15/16，H200）**：Dense 1.3B：峰值 **29.2 GiB**（两台 pod 复测一致），2.53 s/步，全程 139s。**MoE 30B-A3B：峰值 101.2 GiB**，6.86 s/步，全程 316s。结论：H200 ✅（余量 ~40GB）；H20 96GB ⚠️ 需 BATCH_CFG=0 降压；**80GB 卡 ❌ bf16 官方配置不可行（须量化或大幅降配）**。原始数据在 HF `xiefan46/lingbot-env-cache` 的 `outputs/`。
+**实测（2026-07-15/16，H200）**：Dense 1.3B：峰值 **29.2 GiB**（两台 pod 复测一致），2.53 s/步，全程 139s。**MoE 30B-A3B：峰值 101.2 GiB**，6.86 s/步，全程 316s。消融实测（steps=12）：BATCH_CFG=0 → 83.9 GiB（9.36s/it，合批 CFG 有 37% 速度优势）；+chunked_scatter → 80.4 GiB；chunked_scatter 单开 95.3 GiB **零速度代价，推荐常开**；192p → 71.5 GiB。结论：H200 ✅；**H20 96GB ✅（BATCH_CFG=0 后 83.9）**；80GB 卡 480p ❌（全降压仍 80.4，差 0.4GB）、192p ✅。原始数据在 HF `xiefan46/lingbot-env-cache` 的 `outputs/`。
 
 ## 显存不够时的旋钮（80GB 卡参考）
 

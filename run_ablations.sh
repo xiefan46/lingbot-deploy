@@ -60,8 +60,10 @@ run_one chunked_scatter "95–96 GiB" LINGBOT_MOE_RESTORE_BACKEND=chunked_scatte
 # 4) 组合降压：H20 96GB 可行性的直接答案
 run_one combo "84–86 GiB" BATCH_CFG=0 LINGBOT_MOE_RESTORE_BACKEND=chunked_scatter
 
-# 5) 一致性检验：帧数减半(61=4n+1)+batch_cfg 开 → packed 序列 ≈ 实验2 → 峰值应≈实验2
-run_one half_frames "≈实验2（87–90 GiB）" NUM_FRAMES=61
+# 5) 一致性检验：时长减半（DURATION=2.5 → 61 帧）+batch_cfg 开 → packed 序列 ≈ 实验2。
+#    注意必须用 DURATION：--num_frames 会被 prompt.json 的 duration 覆盖（首轮实验实测踩坑，
+#    峰值与 baseline 逐 MiB 相同）。
+run_one half_duration "≈实验2（~84 GiB）" DURATION=2.5
 
 # 6) 192p：token 降到基线的 ~15% → 逼近"权重+固定开销"下限；也回答 80GB 卡 192p 可行性
 run_one res_192p "75–77 GiB" HEIGHT=192 WIDTH=320
@@ -71,6 +73,10 @@ if [ "${RUN_FP8:-0}" = "1" ]; then
     log "安装 SGLang 可选依赖（--no-deps，不动 torch 栈）..."
     "$PIP" install -q --no-deps -r "${LINGBOT_REPO}/requirements-sglang.txt" \
         || warn "SGLang 依赖安装失败，跳过 FP8 实验"
+    # sglang 的 python 侧还要 orjson；pin 的 sglang-kernel 0.4.4 预编译 so 与新 torch ABI
+    # 可能不匹配（undefined symbol），升级到最新（--no-deps 保护 torch 栈）
+    "$PIP" install -q orjson
+    "$PIP" install -qU --no-deps sglang-kernel || warn "sglang-kernel 升级失败，FP8 实验可能因 ABI 不匹配失败"
     run_one fp8_runtime "128–132 GiB（不省反增）" LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8
 fi
 
