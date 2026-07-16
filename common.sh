@@ -36,6 +36,15 @@ PY="${VENV_DIR}/bin/python"
 PIP="${VENV_DIR}/bin/pip"
 HF_BIN="${VENV_DIR}/bin/hf"
 
+# CUDA forward-compat：宿主机驱动 <13 时 setup_env.sh 会装 cuda-compat-13-0，
+# 这里让每个脚本的 shell 都自动带上用户态 libcuda（上游 run 脚本也是同款逻辑）
+for _compat_dir in /usr/local/cuda-13.0/compat /usr/local/cuda/compat; do
+    if [ -e "${_compat_dir}/libcuda.so.1" ]; then
+        export LD_LIBRARY_PATH="${_compat_dir}:${LD_LIBRARY_PATH:-}"
+        break
+    fi
+done
+
 activate_venv() {
     [ -f "${VENV_DIR}/bin/activate" ] || err "venv 不存在: ${VENV_DIR}，先运行 bash setup_env.sh"
     # shellcheck disable=SC1091

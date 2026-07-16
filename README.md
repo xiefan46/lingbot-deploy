@@ -67,7 +67,7 @@ NUM_FRAMES=49 bash run_moe_t2v.sh                                 # 5s→2s（�
 4. **不要开 refiner**（`--run_refiner`）：refiner 是**同尺寸的另一个 30B DiT**，双模型 120GB 权重 + 1080p 工作区，单卡（含 H200）放不下。上游 refiner 方案是 8 卡 CP8+FSDP。
 5. **不要用 `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8` 来省显存**：开源实现是运行时量化+额外缓存，bf16 权重不释放，显存反增 ~29GB（它是多卡 FSDP 下的提速方案）。单卡省显存只能用默认 `grouped_mm`。
 6. **rewriter 不用部署**：冒烟用上游自带的结构化 prompt（`assets/cases/`）。要用自己的 prompt 时才需要 Qwen3.6-27B rewriter（bf16 ~54GB，届时单独规划）。
-7. **宿主机驱动必须支持 CUDA ≥13**：RunPod 不同宿主机驱动版本不一（实测踩过 12.4 的）。驱动 12.x 时 PyPI 默认的 cu13 torch 会 `CUDA not available`，且 FA3 缓存 wheel（cu13 链接）不可用。**开 pod 时在筛选条件里把 CUDA Version 选 13.0**，开机先 `nvidia-smi | head -3` 确认。落到 12.x 机器上的降级方案：脚本会自动装 cu12x torch，此时 `SKIP_FA3=1` 重跑 setup、运行全程 `BATCH_CFG=0`。
+7. **宿主机驱动 <13 时靠 forward-compat 现场解决**：RunPod 不同宿主机驱动版本不一（实测踩过 12.4 的），驱动 12.x 时 cu13 torch 会 `CUDA not available`。`setup_env.sh` 会自动安装 **`cuda-compat-13-0`**（NVIDIA forward-compatibility，数据中心卡专用的用户态 libcuda），`common.sh` 自动把 `/usr/local/cuda-13.0/compat` 加进 `LD_LIBRARY_PATH`——之后 cu13 torch 和 FA3 缓存 wheel 照常可用。若该驱动分支不在 compat 支持矩阵内（验证仍报 CUDA not available）：要么开 pod 时筛 CUDA Version ≥13.0，要么就地降级 `rm -rf /root/lingbot/.venv && TORCH_CUDA_VARIANT=cu128 SKIP_FA3=1 bash setup_env.sh` + 运行全程 `BATCH_CFG=0`。
 
 ## 文件说明
 

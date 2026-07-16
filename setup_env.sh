@@ -75,9 +75,63 @@ driver_cuda=$(nvidia-smi | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | grep -oE '[
 driver_cuda_major=${driver_cuda%%.*}
 log "驱动支持的 CUDA: ${driver_cuda} | GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 
+# 配置 NVIDIA cuda apt 源（幂等；处理镜像自带源与 cuda-keyring 的 Signed-By 冲突）
+ensure_nvidia_apt_repo() {
+    . /etc/os-release
+    local distro="ubuntu${VERSION_ID//./}"
+    if ! grep -rqs "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
+            && dpkg -i /tmp/cuda-keyring.deb >/dev/null || return 1
+    fi
+    if ! apt-get update -qq 2>/tmp/apt_update.err; then
+        if grep -q "Signed-By" /tmp/apt_update.err; then
+            warn "apt cuda 源 Signed-By 冲突，移除 cuda-keyring 的重复条目后重试"
+            rm -f "/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
+            apt-get update -qq || return 1
+        else
+            cat /tmp/apt_update.err >&2
+            return 1
+        fi
+    fi
+}
+
+# 驱动 <13 时尝试 CUDA forward-compat：数据中心卡（H200/H100/A100）可在老驱动上
+# 用 cuda-compat-13-0 提供的用户态 libcuda 跑 CUDA 13 应用，无需动宿主机驱动。
+CUDA_COMPAT_ACTIVE=0
+try_cuda_forward_compat() {
+    local d
+    for d in /usr/local/cuda-13.0/compat /usr/local/cuda/compat; do
+        if [ -e "${d}/libcuda.so.1" ]; then
+            export LD_LIBRARY_PATH="${d}:${LD_LIBRARY_PATH:-}"
+            CUDA_COMPAT_ACTIVE=1
+            log "forward-compat 已就绪（${d}），老驱动可跑 cu13"
+            return 0
+        fi
+    done
+    log "驱动 CUDA ${driver_cuda} < 13，尝试安装 forward-compat 包 cuda-compat-13-0..."
+    ensure_nvidia_apt_repo || { warn "NVIDIA apt 源不可用，装不了 compat"; return 1; }
+    apt-get install -y -qq cuda-compat-13-0 || { warn "cuda-compat-13-0 安装失败"; return 1; }
+    for d in /usr/local/cuda-13.0/compat /usr/local/cuda/compat; do
+        if [ -e "${d}/libcuda.so.1" ]; then
+            export LD_LIBRARY_PATH="${d}:${LD_LIBRARY_PATH:-}"
+            CUDA_COMPAT_ACTIVE=1
+            log "forward-compat 就绪: ${d}"
+            return 0
+        fi
+    done
+    return 1
+}
+if [ "$driver_cuda_major" -lt 13 ]; then
+    try_cuda_forward_compat || warn "forward-compat 不可用——将走 cu12x torch 路线（FA3 缓存不可用，运行需 BATCH_CFG=0）"
+fi
+
 install_torch_fallback() {
     warn "回退安装稳定版 torch/torchvision（上游只在 pin 的 nightly 上测过；装完看验证输出的 torch._grouped_mm 确认）"
-    if [ "$driver_cuda_major" -ge 13 ]; then
+    if [ -n "${TORCH_CUDA_VARIANT:-}" ]; then
+        "$PIP" install -U torch torchvision --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT}"
+        return
+    fi
+    if [ "$driver_cuda_major" -ge 13 ] || [ "$CUDA_COMPAT_ACTIVE" = "1" ]; then
         # PyPI 默认 wheel 目前就是 cu13 构建
         "$PIP" install -U torch torchvision
     else
@@ -95,7 +149,7 @@ if [ "${FORCE_TORCH_FALLBACK:-}" = "1" ]; then
     install_torch_fallback
 elif "$PY" -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
     log "torch 已安装: $("$PY" -c 'import torch; print(torch.__version__)')，跳过（强制重装: rm -rf $VENV_DIR 后重跑）"
-elif [ "$driver_cuda_major" -ge 13 ]; then
+elif [ "$driver_cuda_major" -ge 13 ] || [ "$CUDA_COMPAT_ACTIVE" = "1" ]; then
     log "安装上游 pin: ${TORCH_PIN}（cu130 nightly，约 3GB）..."
     "$PIP" install --extra-index-url "$NIGHTLY_INDEX" "$TORCH_PIN" "$TORCHVISION_PIN" || install_torch_fallback
 else
@@ -149,23 +203,8 @@ _fa3_ensure_toolkit() {
     distro="ubuntu${VERSION_ID//./}"
     toolkit_pkg="cuda-toolkit-${torch_cuda%%.*}-${torch_cuda#*.}"
     log "镜像没有与 torch CUDA ${torch_cuda} 匹配的 nvcc，从 NVIDIA apt 源安装 ${toolkit_pkg}（~4GB）..."
-    # 多数 CUDA 基础镜像已配好 NVIDIA cuda 源——已有就直接用；重复装 cuda-keyring
-    # 会让同一源出现两条 Signed-By 不一致的配置，apt 直接报错。
-    if ! grep -rqs "developer.download.nvidia.com/compute/cuda/repos" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-        wget -q "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb" -O /tmp/cuda-keyring.deb \
-            && dpkg -i /tmp/cuda-keyring.deb >/dev/null \
-            || err "cuda-keyring 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
-    fi
-    if ! apt-get update -qq 2>/tmp/apt_update.err; then
-        if grep -q "Signed-By" /tmp/apt_update.err; then
-            warn "apt cuda 源 Signed-By 冲突（镜像自带源 + cuda-keyring 重复），移除 keyring 加的重复条目后重试"
-            rm -f "/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
-            apt-get update -qq || { cat /tmp/apt_update.err >&2; err "apt update 仍失败"; }
-        else
-            cat /tmp/apt_update.err >&2
-            err "apt update 失败"
-        fi
-    fi
+    ensure_nvidia_apt_repo \
+        || err "NVIDIA apt 源配置失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
     apt-get install -y -qq "$toolkit_pkg" \
         || err "${toolkit_pkg} 安装失败。备选: 换 CUDA ${torch_cuda} 的 devel 镜像；或 SKIP_FA3=1 重跑并在运行时用 BATCH_CFG=0"
     CUDA_HOME_MATCHED=$(_fa3_pick_cuda_home) || err "toolkit 装完仍找不到匹配的 nvcc"
