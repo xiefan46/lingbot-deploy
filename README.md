@@ -78,3 +78,4 @@ NUM_FRAMES=49 bash run_moe_t2v.sh                                 # 5s→2s（�
 | `download_models.sh` | 下载权重 `dense\|moe\|all` |
 | `run_dense_t2v.sh` | 1.3B 冒烟测试 |
 | `run_moe_t2v.sh` | 30B MoE 单卡 T2V + 显存/耗时实测 |
+| `run_ablations.sh` | 显存归因消融套件（6+1 组对照，每组带事前预测值，自动汇总表格） |
